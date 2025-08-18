@@ -6,7 +6,8 @@ using UnityEngine.AI;
 public class AgentAnimationController : MonoBehaviour
 {
     [SerializeField] private NavMeshAgent _agent;
-    
+    [SerializeField] private float _stopThreshold = 0.05f;
+
     private Animator _animator;
 
     // Start is called before the first frame update
@@ -18,6 +19,10 @@ public class AgentAnimationController : MonoBehaviour
     // Update is called once per frame
     void Update()
     {
-        _animator.SetFloat("speed", _agent.velocity.magnitude);
+        float speed = _agent.velocity.magnitude;
+
+        if (!_agent.pathPending && _agent.remainingDistance <= _agent.stoppingDistance) speed = 0f;
+
+        _animator.SetFloat("speed", speed);
     }
 }
