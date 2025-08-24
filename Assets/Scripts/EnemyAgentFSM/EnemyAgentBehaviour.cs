@@ -27,6 +27,9 @@ public class EnemyAgentBehaviour : MonoBehaviour
     [SerializeField, Range(10f, 120f)] private float _visionAngle = 60f;
     [SerializeField] private int _visionSegments = 30;
     [SerializeField] private Color _visionColor = Color.yellow;
+    [SerializeField] private Color _alertColor = Color.red;
+    [SerializeField] private LayerMask _obstacleLayer = -1;
+    [SerializeField] private LayerMask _playerLayer = 1;
 
     [Header("Return/Arrival Settings")]
     public float arriveTolerance = 0.05f;
@@ -77,22 +80,8 @@ public class EnemyAgentBehaviour : MonoBehaviour
     private void Update()
     {
         _currentState?.Update(this);
-
-        if (_lineRenderer != null)
-        {
-            if (_currentState is FSM_AllertState)
-            {
-                _lineRenderer.startColor = Color.red;
-                _lineRenderer.endColor = Color.red;
-            }
-            else
-            {
-                _lineRenderer.startColor = _visionColor;
-                _lineRenderer.endColor = _visionColor;
-            }
-        }
-
-        DrawFOV(_visionAngle, _radius, _visionSegments);
+        DrawFOV();
+        UpdateFOVColor();
     }
 
     #region FSM
@@ -163,7 +152,7 @@ public class EnemyAgentBehaviour : MonoBehaviour
         for (int i = 0; i < _destinationWaypoints.Length; i++)
         {
             Vector3 toWaypoint = _destinationWaypoints[i].position - transform.position;
-            toWaypoint.y = 0f; // ignora altezza
+            toWaypoint.y = 0f; // <- ignora altezza
             float sqrDist = toWaypoint.sqrMagnitude;
 
             if (sqrDist < closestSqrDist)
@@ -177,39 +166,96 @@ public class EnemyAgentBehaviour : MonoBehaviour
     }
     #endregion
 
-    #region FOV
+    #region FOV with Obstacles detection
     private void LineRendererSetup()
     {
         _lineRenderer = gameObject.AddComponent<LineRenderer>();
-        _lineRenderer.positionCount = _visionSegments + 2; // +2 per centro e chiusura
         _lineRenderer.widthMultiplier = 0.05f;
         _lineRenderer.material = new Material(Shader.Find("Sprites/Default"));
-        _lineRenderer.startColor = _visionColor;
-        _lineRenderer.endColor = _visionColor;
+        SetLineRendererColor(_visionColor);
         _lineRenderer.useWorldSpace = true;
         _lineRenderer.loop = true;
+        _lineRenderer.sortingOrder = 1;
     }
 
-    private void DrawFOV(float angle, float radius, int segments)
+    private void DrawFOV()
     {
         if (_lineRenderer == null) return;
 
-        _lineRenderer.positionCount = segments + 2;
-        _lineRenderer.SetPosition(0, transform.position);
+        List<Vector3> visionPoints = CalculateFOVPoints();
+        ApplyPointsToLineRenderer(visionPoints);
+    }
 
-        float halfAngle = angle / 2f;
+    private List<Vector3> CalculateFOVPoints()
+    {
+        List<Vector3> points = new List<Vector3>();
+        Vector3 origin = GetFOVOrigin();
 
-        for (int i = 0; i <= segments; i++)
+        points.Add(origin); // <- aggiungi il punto di origine
+
+        // calcola i parametri del cono
+        float startAngle = -_visionAngle / 2f;
+        float angleIncrement = _visionAngle / _visionSegments;
+
+        // genera i punti del perimetro del cono con rilevamento ostacoli
+        for (int i = 0; i <= _visionSegments; i++)
         {
-            float currentAngle = -halfAngle + (angle / segments) * i;
-            float rad = currentAngle * Mathf.Deg2Rad;
+            float currentAngle = startAngle + (angleIncrement * i);
+            Vector3 rayDirection = GetDirectionFromAngle(currentAngle);
 
-            float x = Mathf.Sin(rad) * radius;
-            float z = Mathf.Cos(rad) * radius;
+            float rayDistance = GetRayDistanceWithObstacles(origin, rayDirection);
+            Vector3 endPoint = origin + rayDirection * rayDistance;
 
-            Vector3 point = transform.position + transform.rotation * new Vector3(x, 0, z);
-            _lineRenderer.SetPosition(i + 1, point);
+            points.Add(endPoint);
         }
+
+        return points;
+    }
+
+    private Vector3 GetFOVOrigin()
+    {
+        return transform.position + Vector3.up * 0.1f; // <- posizione leggermente elevata per evitare problemi con il terreno (come ha suggerito il prof. Luca)
+    }
+
+    private Vector3 GetDirectionFromAngle(float angleOffset)
+    {
+        float totalAngle = transform.eulerAngles.y + angleOffset;
+        float radians = totalAngle * Mathf.Deg2Rad;
+
+        return new Vector3(Mathf.Sin(radians), 0, Mathf.Cos(radians));
+    }
+
+    private float GetRayDistanceWithObstacles(Vector3 origin, Vector3 direction)
+    {
+        RaycastHit hit;
+        if (Physics.Raycast(origin, direction, out hit, _radius, _obstacleLayer))
+        {
+            return hit.distance;
+        }
+        return _radius;
+    }
+
+    private void ApplyPointsToLineRenderer(List<Vector3> points)
+    {
+        _lineRenderer.positionCount = points.Count;
+        _lineRenderer.SetPositions(points.ToArray());
+    }
+
+    private void UpdateFOVColor()
+    {
+        Color targetColor = (_currentState is FSM_AllertState) ? _alertColor : _visionColor;
+        SetLineRendererColor(targetColor);
+    }
+
+    private void SetLineRendererColor(Color color)
+    {
+        // crea un gradiente uniforme con il colore che gli passo
+        Gradient gradient = new Gradient();
+        gradient.SetKeys(
+            new GradientColorKey[] { new GradientColorKey(color, 0.0f), new GradientColorKey(color, 1.0f) },
+            new GradientAlphaKey[] { new GradientAlphaKey(color.a, 0.0f), new GradientAlphaKey(color.a, 1.0f) }
+        );
+        _lineRenderer.colorGradient = gradient;
     }
 
     public bool IsPlayerNear()
@@ -222,13 +268,41 @@ public class EnemyAgentBehaviour : MonoBehaviour
 
         if (PlayerTarget == null) return false;
 
-        Vector3 dirToPlayer = (PlayerTarget.position - transform.position).normalized;
-        float angleToPlayer = Vector3.Angle(transform.forward, dirToPlayer);
-        if (angleToPlayer <= _visionAngle / 2f)
+        return IsPlayerInFOV();
+    }
+
+    private bool IsPlayerInFOV()
+    {
+        Vector3 origin = GetFOVOrigin();
+        Vector3 toPlayer = PlayerTarget.position - origin;
+        float distanceToPlayer = toPlayer.magnitude;
+
+        // controllo distanza
+        if (distanceToPlayer > _radius) return false;
+
+        // controllo angolo
+        Vector3 directionToPlayer = toPlayer.normalized;
+        float angleToPlayer = Vector3.Angle(transform.forward, directionToPlayer);
+        if (angleToPlayer > _visionAngle / 2f) return false;
+
+        // controllo ostacoli + verifica che non ci siano ostacoli tra nemico e player
+        return !IsPlayerBlockedByObstacle(origin, directionToPlayer, distanceToPlayer);
+    }
+
+    private bool IsPlayerBlockedByObstacle(Vector3 origin, Vector3 direction, float distance)
+    {
+        RaycastHit hit;
+        if (Physics.Raycast(origin, direction, out hit, distance, _obstacleLayer))
         {
-            float dist = Vector3.Distance(transform.position, PlayerTarget.position);
-            if (dist <= _radius) return true;
+            return true;
         }
+
+        // Doppio controllo con raycast verso il player specifico
+        if (Physics.Raycast(origin, direction, out hit, distance))
+        {
+            return hit.transform != PlayerTarget;
+        }
+
         return false;
     }
     #endregion
@@ -245,6 +319,30 @@ public class EnemyAgentBehaviour : MonoBehaviour
         yield return new WaitForSeconds(delay);
         ChangeState(new FSM_ReturningState());
         _returnCoroutine = null;
+    }
+    #endregion
+
+    #region Debug Gizmos
+    private void OnDrawGizmosSelected()
+    {
+        // disegna il raggio di visione
+        Gizmos.color = (_currentState is FSM_AllertState) ? Color.red : Color.white;
+        Gizmos.DrawWireSphere(transform.position, _radius);
+
+        // disegna i confini dell'angolo di visione
+        Vector3 leftBoundary = GetDirectionFromAngle(-_visionAngle / 2f) * _radius;
+        Vector3 rightBoundary = GetDirectionFromAngle(_visionAngle / 2f) * _radius;
+
+        Gizmos.color = Color.blue;
+        Gizmos.DrawLine(transform.position, transform.position + leftBoundary);
+        Gizmos.DrawLine(transform.position, transform.position + rightBoundary);
+
+        // mostra direzione verso il player qualora rilevato
+        if (IsPlayerNear() && PlayerTarget != null)
+        {
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawLine(transform.position, PlayerTarget.position);
+        }
     }
     #endregion
 

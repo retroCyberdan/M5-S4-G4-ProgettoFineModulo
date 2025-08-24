@@ -8,7 +8,7 @@ public class VictoryPoint : MonoBehaviour
     {
         if (other.CompareTag("Player"))
         {
-            GameManager.Instance.VictoryUI();
+            GameManager.Instance.TriggerVictory();
         }
     }
 }

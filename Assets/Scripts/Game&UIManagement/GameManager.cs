@@ -1,16 +1,16 @@
 ﻿using System.Collections;
 using System.Collections.Generic;
-using TMPro;
 using UnityEngine;
 using UnityEngine.AI;
 using UnityEngine.SceneManagement;
+using System;
 
 public enum CAPTURE_MODE { GAME_OVER, RESPAWN, HYBRID }
 public enum RESPAWN_TYPE { TELEPORT, RELOAD_SCENE }
 
 public class GameManager : MonoBehaviour
 {
-    public static GameManager Instance { get; private set; }  // <- gestisco il GameManager in singleton
+    public static GameManager Instance { get; private set; }
 
     [Header("Capture Mode Settings")]
     [SerializeField] private CAPTURE_MODE _captureMode = CAPTURE_MODE.RESPAWN;
@@ -20,14 +20,17 @@ public class GameManager : MonoBehaviour
     [SerializeField] private RESPAWN_TYPE _respawnType = RESPAWN_TYPE.TELEPORT;
     [SerializeField] private Transform _respawnPoint;
 
-    [Header("UI Settings")]
-    [SerializeField] private GameObject _gameOverUI;
-    [SerializeField] private GameObject _victoryUI;
-    [SerializeField] private Transform _restartPoint;
-
     private int _attemptsLeft;
     private bool _isRespawn = false;
     private GameObject _player;
+    private bool _isReinitialized = true;
+
+    #region UI Manager
+    public static event Action<int, bool> OnAttemptsChanged;
+    public static event Action OnGameInitialized;
+    public static event Action OnGameOver;
+    public static event Action OnVictory;
+    #endregion
 
     void Awake()
     {
@@ -38,17 +41,67 @@ public class GameManager : MonoBehaviour
         }
         Instance = this;
         DontDestroyOnLoad(gameObject);
+
+        SceneManager.sceneLoaded += OnSceneLoaded;
     }
 
     void Start()
     {
-        _attemptsLeft = _maxAttempts;
-        TextUIManager.Instance?.UpdateAttemptsUI(_attemptsLeft, _captureMode == CAPTURE_MODE.HYBRID);
-        _restartPoint = _respawnPoint;
-
-        if (_gameOverUI != null) _gameOverUI.SetActive(false);
-        if (_victoryUI != null) _victoryUI.SetActive(false);
+        InitializeGame();
     }
+
+    #region Scene Initialization
+    void OnDestroy()
+    {
+        SceneManager.sceneLoaded -= OnSceneLoaded;
+    }
+
+    private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+    {
+        _isReinitialized = true;
+        StartCoroutine(ReinitializeAfterSceneLoad());
+    }
+
+    private IEnumerator ReinitializeAfterSceneLoad()
+    {
+        yield return new WaitForEndOfFrame();
+
+        if (_isReinitialized)
+        {
+            InitializeGame();
+            _isReinitialized = false;
+        }
+    }
+
+    private void InitializeGame()
+    {
+        // reset delle variabili di gioco
+        _attemptsLeft = _maxAttempts;
+        _isRespawn = false;
+        _player = null;
+
+        // trova il respawn point
+        RefreshRespawnPoint();
+
+        // notifica l'UIManager dell'inizializzazione
+        OnGameInitialized?.Invoke();
+        OnAttemptsChanged?.Invoke(_attemptsLeft, _captureMode == CAPTURE_MODE.HYBRID);
+
+        Debug.Log($"[GameManager] Game initialized - Attempts: {_attemptsLeft}");
+    }
+
+    private void RefreshRespawnPoint()
+    {
+        if (_respawnPoint == null)
+        {
+            GameObject respawnObj = GameObject.FindGameObjectWithTag("RespawnPoint");
+            if (respawnObj != null)
+            {
+                _respawnPoint = respawnObj.transform;
+            }
+        }
+    }
+    #endregion
 
     #region Capture Modes Methods
     public void OnPlayerCaught(GameObject caughtPlayer)
@@ -58,10 +111,12 @@ public class GameManager : MonoBehaviour
         _player = caughtPlayer;
         _isRespawn = true;
 
+        Debug.Log($"[GameManager] Player caught! Mode: {_captureMode}, Attempts left: {_attemptsLeft}");
+
         switch (_captureMode)
         {
             case CAPTURE_MODE.GAME_OVER:
-                GameOverUI();
+                TriggerGameOver();
                 break;
 
             case CAPTURE_MODE.RESPAWN:
@@ -72,15 +127,14 @@ public class GameManager : MonoBehaviour
                 if (_attemptsLeft > 1)
                 {
                     _attemptsLeft--;
-                    TextUIManager.Instance?.UpdateAttemptsUI(_attemptsLeft, true);
-                    TextUIManager.Instance?.AnimateAttemptsText();
+                    OnAttemptsChanged?.Invoke(_attemptsLeft, true);
                     StartCoroutine(RespawnCoroutine());
                 }
                 else
                 {
                     _attemptsLeft = 0;
-                    TextUIManager.Instance?.UpdateAttemptsUI(_attemptsLeft, true);
-                    GameOverUI();
+                    OnAttemptsChanged?.Invoke(_attemptsLeft, true);
+                    TriggerGameOver();
                 }
                 break;
         }
@@ -126,72 +180,74 @@ public class GameManager : MonoBehaviour
     }
     #endregion
 
-    #region UI
-    private void GameOverUI()
+    #region Game State Methods
+    private void TriggerGameOver()
     {
-        if (_gameOverUI != null) _gameOverUI.SetActive(true);
+        Debug.Log("[GameManager] Triggering Game Over");
+
+        // disabilita il controller del player in caso di sconfitta
         if (_player != null)
         {
             var controller = _player.GetComponent<PlayerAgentController>();
             if (controller != null) controller.enabled = false;
         }
 
+        // notifica l'UIManager
+        OnGameOver?.Invoke();
+
+        // a questo punto riproduce l'audio
         AudioManager.Instance?.PlayGameOverSound();
     }
 
-    public void VictoryUI()
+    public void TriggerVictory()
     {
-        if (_victoryUI != null) _victoryUI.SetActive(true);
+        Debug.Log("[GameManager] Triggering Victory");
+
+        // disabilita il controller del player
+        if (_player == null)
+        {
+            _player = GameObject.FindGameObjectWithTag("Player");
+        }
+
         if (_player != null)
         {
             var controller = _player.GetComponent<PlayerAgentController>();
             if (controller != null) controller.enabled = false;
         }
 
+        // notifica l'UIManager
+        OnVictory?.Invoke();
+
+        // a questo punto riproduce l'audio
         AudioManager.Instance?.PlayVictorySound();
     }
+    #endregion
 
+    #region Restart/Main Menu
     public void RestartLevel()
     {
-        //if (_player != null && _restartPoint != null)
-        //{
-        //    NavMeshAgent agent = _player.GetComponent<NavMeshAgent>();
-        //    if (agent != null)
-        //    {
-        //        agent.ResetPath();
-        //        agent.Warp(_restartPoint.position);
-        //    }
-        //    else
-        //    {
-        //        _player.transform.position = _restartPoint.position;
-        //        _player.transform.rotation = _restartPoint.rotation;
-        //    }
-
-        //    EnemyAgentBehaviour[] enemies = FindObjectsOfType<EnemyAgentBehaviour>();
-        //    foreach (var enemy in enemies)
-        //    {
-        //        enemy.PlayerTarget = _player.transform;
-        //    }
-
-        //    _attemptsLeft = _maxAttempts;
-        //    TextUIManager.Instance?.UpdateAttemptsUI(_attemptsLeft, true);
-
-        //    if (_gameOverUI != null)
-        //        _gameOverUI.SetActive(false);
-
-        //    _isRespawn = false;
-
-        //    var controller = _player.GetComponent<PlayerAgentController>();
-        //    if (controller != null)
-        //        controller.enabled = true;
-        //}
-
+        Debug.Log("[GameManager] Restarting level...");
         SceneManager.LoadScene("ProgettoFineModulo");
     }
 
     public void BackToMainMenu()
     {
+        Debug.Log("[GameManager] Going back to main menu...");
         SceneManager.LoadScene("MainMenu");
     }
+    #endregion
+
+    #region Debug Methods
+    public void DebugCurrentState()
+    {
+        Debug.Log($"[GameManager Debug] Attempts: {_attemptsLeft}, IsRespawn: {_isRespawn}, " +
+                  $"Player: {_player != null}, RespawnPoint: {_respawnPoint != null}");
+    }
+    #endregion
+
+    #region Public Getters
+    public int AttemptsLeft => _attemptsLeft;
+    public CAPTURE_MODE CaptureMode => _captureMode;
+    public bool IsRespawnMode => _isRespawn;
     #endregion
 }
